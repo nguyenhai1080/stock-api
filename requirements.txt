@@ -1,0 +1,5 @@
+fastapi[standard]
+vnstock
+pandas
+pydantic
+uvicorn
