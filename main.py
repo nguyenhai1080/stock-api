@@ -6,9 +6,10 @@ from threading import Lock
 from typing import Any
 import math
 import re
+import traceback
 import pandas as pd
 
-app = FastAPI(title="vn-signal-bridge", version="3.0.0")
+app = FastAPI(title="vn-signal-bridge", version="3.0.1")
 
 SUPPORTED_SOURCES = ["KBS", "MSN", "VCI"]
 MAX_WORKERS = 8
@@ -511,8 +512,25 @@ def scan_universe(symbols: list[str]) -> list[dict]:
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(build_universe_item, code): code for code in codes}
+
         for future in as_completed(futures):
-            results.append(future.result())
+            code = futures[future]
+            try:
+                results.append(future.result())
+            except Exception as e:
+                results.append({
+                    "ok": False,
+                    "symbol": code,
+                    "sector": "Other",
+                    "groupTag": "General",
+                    "liquidityTier": "Low",
+                    "active": False,
+                    "trendStage": "Unknown",
+                    "setupRank": "D",
+                    "signalScore": 0,
+                    "error": str(e),
+                    "details": [traceback.format_exc()]
+                })
 
     results.sort(
         key=lambda x: (
@@ -526,7 +544,7 @@ def scan_universe(symbols: list[str]) -> list[dict]:
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": "vn-signal-bridge", "version": "3.0.0"}
+    return {"ok": True, "service": "vn-signal-bridge", "version": "3.0.1"}
 
 
 @app.get("/health")
@@ -535,55 +553,68 @@ def health():
         "ok": True,
         "supportedSources": SUPPORTED_SOURCES,
         "cacheItems": len(_quote_cache),
-        "universeSize": len(DEFAULT_UNIVERSE)
+        "universeSize": len(DEFAULT_UNIVERSE),
+        "version": "3.0.1"
     }
 
 
 @app.get("/signal")
 def signal(symbol: str):
-    return get_signal_payload(symbol)
+    try:
+        return get_signal_payload(symbol)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 @app.post("/batch_signals")
 def batch_signals(req: BatchRequest):
-    symbols = unique_symbols(req.symbols)
-    results = []
+    try:
+        symbols = unique_symbols(req.symbols)
+        results = []
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(get_signal_payload, code): code for code in symbols}
-        for future in as_completed(futures):
-            results.append(future.result())
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(get_signal_payload, code): code for code in symbols}
 
-    results.sort(key=lambda x: x.get("symbol", ""))
-    success = sum(1 for x in results if x.get("ok"))
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    results.append({
+                        "ok": False,
+                        "symbol": code,
+                        "error": str(e),
+                        "details": [traceback.format_exc()]
+                    })
 
-    return {
-        "ok": True,
-        "total": len(results),
-        "success": success,
-        "failed": len(results) - success,
-        "results": results
-    }
+        results.sort(key=lambda x: x.get("symbol", ""))
+        success = sum(1 for x in results if x.get("ok"))
+
+        return {
+            "ok": True,
+            "total": len(results),
+            "success": success,
+            "failed": len(results) - success,
+            "results": results
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 @app.post("/batch_universe")
 def batch_universe(req: BatchRequest):
     try:
         symbols = unique_symbols(req.symbols)
-        results = []
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(build_universe_item, code): code for code in symbols}
-            for future in as_completed(futures):
-                results.append(future.result())
-
-        results.sort(
-            key=lambda x: (
-                0 if x.get("ok") else 1,
-                -safe_float(x.get("signalScore", 0)),
-                x.get("symbol", "")
-            )
-        )
+        results = scan_universe(symbols)
 
         success = sum(1 for x in results if x.get("ok"))
 
@@ -596,7 +627,6 @@ def batch_universe(req: BatchRequest):
         }
 
     except Exception as e:
-        import traceback
         return {
             "ok": False,
             "error": str(e),
@@ -635,7 +665,6 @@ def universe_auto(
         }
 
     except Exception as e:
-        import traceback
         return {
             "ok": False,
             "error": str(e),
@@ -654,16 +683,19 @@ def top_picks(
     try:
         results = scan_universe(DEFAULT_UNIVERSE)
 
-        filtered = [
-            x for x in results
-            if passes_top_pick_filter(
-                x,
-                min_score=min_score,
-                min_setup_rank=min_setup_rank,
-                active_only=active_only,
-                sector=sector
-            )
-        ]
+        filtered = []
+        for item in results:
+            try:
+                if passes_top_pick_filter(
+                    item,
+                    min_score=min_score,
+                    min_setup_rank=min_setup_rank,
+                    active_only=active_only,
+                    sector=sector
+                ):
+                    filtered.append(item)
+            except Exception:
+                continue
 
         filtered.sort(
             key=lambda x: (
@@ -690,7 +722,6 @@ def top_picks(
         }
 
     except Exception as e:
-        import traceback
         return {
             "ok": False,
             "error": str(e),
