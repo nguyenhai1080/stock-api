@@ -253,54 +253,66 @@ def classify_liquidity(vol_ma20: float):
 
 @app.post("/batch_universe")
 def batch_universe(req: BatchRequest):
-    results = []
-    seen = set()
+    try:
+        results = []
+        seen = set()
 
-    for symbol in req.symbols:
-        code = (symbol or "").strip().upper()
-        if not code or code in seen:
-            continue
-        seen.add(code)
+        for symbol in req.symbols:
+            code = (symbol or "").strip().upper()
+            if not code or code in seen:
+                continue
+            seen.add(code)
 
-        payload = get_signal_payload(code)
-
-        if not payload.get("ok"):
+            payload = get_signal_payload(code)
             sector, group_tag = infer_sector_and_group(code)
-            results.append({
-                "ok": False,
-                "symbol": code,
-                "sector": sector,
-                "groupTag": group_tag,
-                "liquidityTier": "Low",
-                "active": False,
-                "error": payload.get("error", "No data")
-            })
-            continue
 
-        sector, group_tag = infer_sector_and_group(code)
-        vol_ma20 = float(payload.get("volMa20", 0) or 0)
-        liquidity_tier = classify_liquidity(vol_ma20)
-        active = liquidity_tier in ["High", "Medium"]
+            if payload.get("ok"):
+                try:
+                    vol_ma20 = float(payload.get("volMa20", 0) or 0)
+                except Exception:
+                    vol_ma20 = 0.0
 
-        results.append({
+                liquidity_tier = classify_liquidity(vol_ma20)
+                active = liquidity_tier in ["High", "Medium"]
+
+                results.append({
+                    "ok": True,
+                    "symbol": code,
+                    "sector": sector,
+                    "groupTag": group_tag,
+                    "liquidityTier": liquidity_tier,
+                    "active": active,
+                    "currentPrice": payload.get("currentPrice", 0),
+                    "volume": payload.get("volume", 0),
+                    "volMa20": payload.get("volMa20", 0),
+                    "priceDate": payload.get("priceDate", "")
+                })
+            else:
+                results.append({
+                    "ok": False,
+                    "symbol": code,
+                    "sector": sector,
+                    "groupTag": group_tag,
+                    "liquidityTier": "Low",
+                    "active": False,
+                    "error": payload.get("error", "No data"),
+                    "details": payload.get("details", [])
+                })
+
+        success = sum(1 for x in results if x.get("ok"))
+
+        return {
             "ok": True,
-            "symbol": code,
-            "sector": sector,
-            "groupTag": group_tag,
-            "liquidityTier": liquidity_tier,
-            "active": active,
-            "currentPrice": payload.get("currentPrice", 0),
-            "volume": payload.get("volume", 0),
-            "volMa20": payload.get("volMa20", 0),
-            "priceDate": payload.get("priceDate", "")
-        })
+            "total": len(results),
+            "success": success,
+            "failed": len(results) - success,
+            "results": results
+        }
 
-    success = sum(1 for x in results if x.get("ok"))
-
-    return {
-        "ok": True,
-        "total": len(results),
-        "success": success,
-        "failed": len(results) - success,
-        "results": results
-    }
+    except Exception as e:
+        import traceback
+        return {
+            "ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
