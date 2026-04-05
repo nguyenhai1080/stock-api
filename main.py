@@ -1,31 +1,25 @@
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any
 import math
+import re
 import pandas as pd
 
-app = FastAPI(title="vn-signal-bridge", version="2.0.0")
+app = FastAPI(title="vn-signal-bridge", version="2.0.1")
 
-SUPPORTED_SOURCES = ["KBS", "MSN", "FMP", "VCI"]
+# Removed FMP because current vnstock environment on Render does not support it
+SUPPORTED_SOURCES = ["KBS", "MSN", "VCI"]
 MAX_WORKERS = 8
 CACHE_TTL_SECONDS = 900  # 15 minutes
 
 
 class BatchRequest(BaseModel):
-    symbols: list[str] = Field(default_factory=list)
+    symbols: list[str]
 
 
-class CacheEntry(BaseModel):
-    expires_at: float
-    data: dict[str, Any]
-
-
-# ----------------------------
-# Static mappings
-# ----------------------------
 SECTOR_MAP = {
     "VCB": ("Bank", "VN30"),
     "BID": ("Bank", "VN30"),
@@ -102,10 +96,8 @@ SECTOR_MAP = {
 }
 
 
-# ----------------------------
-# In-memory TTL cache
-# ----------------------------
-_quote_cache: dict[str, CacheEntry] = {}
+_quote_cache: dict[str, dict[str, Any]] = {}
+_cache_expiry: dict[str, float] = {}
 _cache_lock = Lock()
 
 
@@ -115,35 +107,32 @@ def now_ts() -> float:
 
 def cache_get(key: str):
     with _cache_lock:
-        entry = _quote_cache.get(key)
-        if not entry:
-            return None
-        if entry.expires_at < now_ts():
+        exp = _cache_expiry.get(key)
+        if not exp or exp < now_ts():
             _quote_cache.pop(key, None)
+            _cache_expiry.pop(key, None)
             return None
-        return entry.data
+        return _quote_cache.get(key)
 
 
-def cache_set(key: str, data: dict[str, Any], ttl_seconds: int = CACHE_TTL_SECONDS):
+def cache_set(key: str, value: dict[str, Any], ttl_seconds: int = CACHE_TTL_SECONDS):
     with _cache_lock:
-        _quote_cache[key] = CacheEntry(
-            expires_at=now_ts() + ttl_seconds,
-            data=data
-        )
+        _quote_cache[key] = value
+        _cache_expiry[key] = now_ts() + ttl_seconds
 
 
-# ----------------------------
-# Utility
-# ----------------------------
 def normalize_symbol(symbol: str) -> str:
-    return (symbol or "").strip().upper()
+    code = (symbol or "").strip().upper()
+    code = code.strip('"').strip("'").strip("`")
+    code = re.sub(r"[^A-Z0-9]", "", code)
+    return code
 
 
 def unique_symbols(symbols: list[str]) -> list[str]:
     seen = set()
     out = []
-    for s in symbols:
-        code = normalize_symbol(s)
+    for symbol in symbols:
+        code = normalize_symbol(symbol)
         if code and code not in seen:
             seen.add(code)
             out.append(code)
@@ -159,22 +148,6 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def infer_sector_and_group(symbol: str):
-    code = normalize_symbol(symbol)
-    return SECTOR_MAP.get(code, ("Other", "General"))
-
-
-def classify_liquidity(vol_ma20: float):
-    if vol_ma20 >= 1_000_000:
-        return "High"
-    if vol_ma20 >= 300_000:
-        return "Medium"
-    return "Low"
-
-
-# ----------------------------
-# Indicators
-# ----------------------------
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -279,11 +252,11 @@ def compute_signal_score(payload: dict) -> float:
 
     score = 0.0
 
-    if price > 0 and ma20 > 0 and price > ma20:
+    if price > ma20 > 0:
         score += 15
-    if ma20 > 0 and ma50 > 0 and ma20 > ma50:
+    if ma20 > ma50 > 0:
         score += 20
-    if ma50 > 0 and ma200 > 0 and ma50 > ma200:
+    if ma50 > ma200 > 0:
         score += 25
 
     if 45 <= rsi <= 70:
@@ -316,9 +289,19 @@ def classify_setup(score: float) -> str:
     return "D"
 
 
-# ----------------------------
-# Data fetch
-# ----------------------------
+def infer_sector_and_group(symbol: str):
+    code = normalize_symbol(symbol)
+    return SECTOR_MAP.get(code, ("Other", "General"))
+
+
+def classify_liquidity(vol_ma20: float):
+    if vol_ma20 >= 1_000_000:
+        return "High"
+    if vol_ma20 >= 300_000:
+        return "Medium"
+    return "Low"
+
+
 def fetch_stock_df(symbol: str, source: str):
     from vnstock import Vnstock
 
@@ -326,16 +309,16 @@ def fetch_stock_df(symbol: str, source: str):
     start_date = (datetime.now() - timedelta(days=420)).strftime("%Y-%m-%d")
     end_date = datetime.now().strftime("%Y-%m-%d")
 
-    df = stock.quote.history(
+    return stock.quote.history(
         start=start_date,
         end=end_date,
         interval="1D"
     )
-    return df
 
 
 def get_signal_payload(symbol: str):
     code = normalize_symbol(symbol)
+
     if not code:
         return {
             "ok": False,
@@ -359,6 +342,7 @@ def get_signal_payload(symbol: str):
                 continue
 
             indicators = build_indicators(df)
+
             result = {
                 "ok": True,
                 "symbol": code,
@@ -436,21 +420,17 @@ def build_universe_item(code: str) -> dict:
     }
 
 
-# ----------------------------
-# Routes
-# ----------------------------
 @app.get("/")
 def root():
-    return {"ok": True, "service": "vn-signal-bridge", "version": "2.0.0"}
+    return {"ok": True, "service": "vn-signal-bridge", "version": "2.0.1"}
 
 
 @app.get("/health")
 def health():
     return {
         "ok": True,
-        "service": "healthy",
-        "cacheItems": len(_quote_cache),
-        "supportedSources": SUPPORTED_SOURCES
+        "supportedSources": SUPPORTED_SOURCES,
+        "cacheItems": len(_quote_cache)
     }
 
 
@@ -517,39 +497,3 @@ def batch_universe(req: BatchRequest):
             "error": str(e),
             "traceback": traceback.format_exc()
         }
-
-
-@app.get("/universe_top")
-def universe_top(limit: int = 50, active_only: bool = True):
-    """
-    Optional endpoint:
-    - expects caller to have warmed the cache or to adapt later with a predefined universe list
-    """
-    items = []
-
-    with _cache_lock:
-        for _, entry in _quote_cache.items():
-            data = entry.data
-            if not isinstance(data, dict):
-                continue
-            if data.get("ok") and data.get("symbol"):
-                code = data["symbol"]
-                items.append(build_universe_item(code))
-
-    if active_only:
-        items = [x for x in items if x.get("active")]
-
-    items.sort(
-        key=lambda x: (
-            0 if x.get("ok") else 1,
-            -safe_float(x.get("signalScore", 0)),
-            x.get("symbol", "")
-        )
-    )
-
-    return {
-        "ok": True,
-        "total": len(items),
-        "limit": limit,
-        "results": items[:max(1, min(limit, 500))]
-    }
