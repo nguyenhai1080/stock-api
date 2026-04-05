@@ -1,5 +1,5 @@
-fastapi[standard]
-vnstock
-pandas
-pydantic
+fastapi
 uvicorn
+pydantic
+pandas
+vnstock
