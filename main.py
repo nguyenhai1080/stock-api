@@ -161,3 +161,146 @@ def batch_signals(req: BatchRequest):
         "failed": len(results) - success,
         "results": results
     }
+    SECTOR_MAP = {
+    "VCB": ("Bank", "VN30"),
+    "BID": ("Bank", "VN30"),
+    "CTG": ("Bank", "VN30"),
+    "TCB": ("Bank", "VN30"),
+    "MBB": ("Bank", "VN30"),
+    "ACB": ("Bank", "LargeCap"),
+    "VPB": ("Bank", "VN30"),
+    "HDB": ("Bank", "LargeCap"),
+    "STB": ("Bank", "LargeCap"),
+
+    "SSI": ("Broker", "VN30"),
+    "VND": ("Broker", "LargeCap"),
+    "VIX": ("Broker", "Midcap"),
+    "HCM": ("Broker", "LargeCap"),
+    "SHS": ("Broker", "Midcap"),
+    "MBS": ("Broker", "Midcap"),
+    "BSI": ("Broker", "Midcap"),
+    "FTS": ("Broker", "Midcap"),
+    "AGR": ("Broker", "Midcap"),
+
+    "VIC": ("RealEstate", "VN30"),
+    "VHM": ("RealEstate", "VN30"),
+    "NVL": ("RealEstate", "LargeCap"),
+    "PDR": ("RealEstate", "Midcap"),
+    "KDH": ("RealEstate", "LargeCap"),
+    "NLG": ("RealEstate", "LargeCap"),
+    "DXG": ("RealEstate", "Midcap"),
+    "DIG": ("RealEstate", "Midcap"),
+    "CEO": ("RealEstate", "Midcap"),
+    "IDC": ("IndustrialZone", "Midcap"),
+
+    "HPG": ("Steel", "VN30"),
+    "HSG": ("Steel", "Midcap"),
+    "NKG": ("Steel", "Midcap"),
+
+    "MWG": ("Retail", "VN30"),
+    "PNJ": ("Retail", "LargeCap"),
+    "FRT": ("Retail", "Midcap"),
+    "DGW": ("Retail", "Midcap"),
+
+    "GAS": ("Energy", "VN30"),
+    "POW": ("Energy", "VN30"),
+    "PVD": ("OilGas", "Midcap"),
+    "PVS": ("OilGas", "Midcap"),
+    "BSR": ("OilGas", "Midcap"),
+    "OIL": ("OilGas", "Midcap"),
+
+    "GMD": ("Logistics", "LargeCap"),
+    "HAH": ("Logistics", "Midcap"),
+    "VSC": ("Logistics", "Midcap"),
+
+    "DGC": ("Chemicals", "LargeCap"),
+    "DPM": ("Chemicals", "Midcap"),
+    "DCM": ("Chemicals", "Midcap"),
+    "CSV": ("Chemicals", "Midcap"),
+
+    "TCM": ("Textile", "Midcap"),
+    "MSH": ("Textile", "Midcap"),
+    "STK": ("Textile", "Midcap"),
+
+    "VHC": ("Seafood", "Midcap"),
+    "ANV": ("Seafood", "Midcap"),
+    "FMC": ("Seafood", "Midcap"),
+
+    "CTD": ("Construction", "Midcap"),
+    "HBC": ("Construction", "Midcap"),
+    "FCN": ("Construction", "Midcap"),
+    "HHV": ("Infrastructure", "Midcap"),
+
+    "FPT": ("Technology", "VN30"),
+    "CMG": ("Technology", "Midcap"),
+
+    "CRC": ("Retail", "Midcap")
+}
+
+def infer_sector_and_group(symbol: str):
+    code = (symbol or "").strip().upper()
+    if code in SECTOR_MAP:
+        return SECTOR_MAP[code]
+    return ("Other", "General")
+
+def classify_liquidity(vol_ma20: float):
+    if vol_ma20 >= 1000000:
+        return "High"
+    if vol_ma20 >= 300000:
+        return "Medium"
+    return "Low"
+
+
+@app.post("/batch_universe")
+def batch_universe(req: BatchRequest):
+    results = []
+    seen = set()
+
+    for symbol in req.symbols:
+        code = (symbol or "").strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+
+        payload = get_signal_payload(code)
+
+        if not payload.get("ok"):
+            sector, group_tag = infer_sector_and_group(code)
+            results.append({
+                "ok": False,
+                "symbol": code,
+                "sector": sector,
+                "groupTag": group_tag,
+                "liquidityTier": "Low",
+                "active": False,
+                "error": payload.get("error", "No data")
+            })
+            continue
+
+        sector, group_tag = infer_sector_and_group(code)
+        vol_ma20 = float(payload.get("volMa20", 0) or 0)
+        liquidity_tier = classify_liquidity(vol_ma20)
+        active = liquidity_tier in ["High", "Medium"]
+
+        results.append({
+            "ok": True,
+            "symbol": code,
+            "sector": sector,
+            "groupTag": group_tag,
+            "liquidityTier": liquidity_tier,
+            "active": active,
+            "currentPrice": payload.get("currentPrice", 0),
+            "volume": payload.get("volume", 0),
+            "volMa20": payload.get("volMa20", 0),
+            "priceDate": payload.get("priceDate", "")
+        })
+
+    success = sum(1 for x in results if x.get("ok"))
+
+    return {
+        "ok": True,
+        "total": len(results),
+        "success": success,
+        "failed": len(results) - success,
+        "results": results
+    }

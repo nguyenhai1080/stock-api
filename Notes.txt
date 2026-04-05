@@ -1,0 +1,21 @@
+https://github.com/nguyenhai1080/stock-api.git
+
+const SPREADSHEET_ID = '1oWK2aklOmo0HrA57WcIZc_ewO1_M25PrcYVpDN_iYYQ';
+const PRICE_API_BASE_URL = 'https://stock-api-veda.onrender.com';
+const PRICE_MULTIPLIER = 1000;
+const TELEGRAM_BOT_TOKEN = '7954347919:AAGPRS4ReNeRL1AqHPlsEiCy9bTkbLcwRDI';
+const TELEGRAM_CHAT_ID = '5171177496';
+
+
+Test trong docs:
+https://stock-api-veda.onrender.com/docs
+
+Try it out
+
+https://stock-api-veda.onrender.com/docs#/default/batch_signals_batch_signals_post
+
+{
+  "symbols": [
+    "FPT", "VIX", "CRC"
+  ]
+}
