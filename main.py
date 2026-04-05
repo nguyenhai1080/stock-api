@@ -8,9 +8,8 @@ import math
 import re
 import pandas as pd
 
-app = FastAPI(title="vn-signal-bridge", version="2.0.1")
+app = FastAPI(title="vn-signal-bridge", version="3.0.0")
 
-# Removed FMP because current vnstock environment on Render does not support it
 SUPPORTED_SOURCES = ["KBS", "MSN", "VCI"]
 MAX_WORKERS = 8
 CACHE_TTL_SECONDS = 900  # 15 minutes
@@ -51,16 +50,22 @@ SECTOR_MAP = {
     "DIG": ("RealEstate", "Midcap"),
     "CEO": ("RealEstate", "Midcap"),
     "IDC": ("IndustrialZone", "Midcap"),
+    "KBC": ("IndustrialZone", "Midcap"),
+    "SZC": ("IndustrialZone", "Midcap"),
 
     "HPG": ("Steel", "VN30"),
     "HSG": ("Steel", "Midcap"),
     "NKG": ("Steel", "Midcap"),
+    "GDA": ("Materials", "Midcap"),
 
     "MWG": ("Retail", "VN30"),
     "PNJ": ("Retail", "LargeCap"),
     "FRT": ("Retail", "Midcap"),
     "DGW": ("Retail", "Midcap"),
     "CRC": ("Retail", "Midcap"),
+    "MSN": ("Consumer", "VN30"),
+    "SAB": ("Consumer", "LargeCap"),
+    "VNM": ("Consumer", "VN30"),
 
     "GAS": ("Energy", "VN30"),
     "POW": ("Energy", "VN30"),
@@ -68,15 +73,19 @@ SECTOR_MAP = {
     "PVS": ("OilGas", "Midcap"),
     "BSR": ("OilGas", "Midcap"),
     "OIL": ("OilGas", "Midcap"),
+    "PLX": ("OilGas", "LargeCap"),
 
     "GMD": ("Logistics", "LargeCap"),
     "HAH": ("Logistics", "Midcap"),
     "VSC": ("Logistics", "Midcap"),
+    "PHP": ("Logistics", "Midcap"),
+    "SCS": ("Logistics", "Midcap"),
 
     "DGC": ("Chemicals", "LargeCap"),
     "DPM": ("Chemicals", "Midcap"),
     "DCM": ("Chemicals", "Midcap"),
     "CSV": ("Chemicals", "Midcap"),
+    "LAS": ("Chemicals", "Midcap"),
 
     "TCM": ("Textile", "Midcap"),
     "MSH": ("Textile", "Midcap"),
@@ -85,14 +94,55 @@ SECTOR_MAP = {
     "VHC": ("Seafood", "Midcap"),
     "ANV": ("Seafood", "Midcap"),
     "FMC": ("Seafood", "Midcap"),
+    "DBC": ("Agriculture", "Midcap"),
+    "BAF": ("Agriculture", "Midcap"),
 
     "CTD": ("Construction", "Midcap"),
     "HBC": ("Construction", "Midcap"),
     "FCN": ("Construction", "Midcap"),
     "HHV": ("Infrastructure", "Midcap"),
+    "C4G": ("Infrastructure", "Midcap"),
+    "LCG": ("Infrastructure", "Midcap"),
 
     "FPT": ("Technology", "VN30"),
     "CMG": ("Technology", "Midcap"),
+    "ELC": ("Technology", "Midcap"),
+
+    "REE": ("Utilities", "LargeCap"),
+    "GEG": ("Utilities", "Midcap"),
+    "NT2": ("Utilities", "Midcap"),
+    "QTP": ("Utilities", "Midcap"),
+    "PPC": ("Utilities", "Midcap"),
+
+    "HVN": ("Aviation", "Midcap"),
+    "VJC": ("Aviation", "LargeCap"),
+    "AST": ("Tourism", "Midcap"),
+    "SKG": ("Tourism", "Midcap"),
+}
+
+
+DEFAULT_UNIVERSE = [
+    "VCB", "BID", "CTG", "TCB", "MBB", "ACB", "VPB", "HDB", "STB", "SHB", "EIB",
+    "SSI", "VND", "VIX", "HCM", "SHS", "MBS", "BSI", "FTS", "AGR",
+    "VIC", "VHM", "NVL", "PDR", "KDH", "NLG", "DXG", "DIG", "CEO", "IDC", "KBC", "SZC",
+    "HPG", "HSG", "NKG", "GDA",
+    "MWG", "PNJ", "FRT", "DGW", "CRC", "MSN", "SAB", "VNM",
+    "GAS", "POW", "PVD", "PVS", "BSR", "OIL", "PLX",
+    "GMD", "HAH", "VSC", "PHP", "SCS",
+    "DGC", "DPM", "DCM", "CSV", "LAS",
+    "TCM", "MSH", "STK",
+    "VHC", "ANV", "FMC", "DBC", "BAF",
+    "CTD", "HBC", "FCN", "HHV", "C4G", "LCG",
+    "FPT", "CMG", "ELC",
+    "REE", "GEG", "NT2", "QTP", "PPC",
+    "HVN", "VJC", "AST", "SKG",
+]
+
+RANK_ORDER = {
+    "A": 4,
+    "B": 3,
+    "C": 2,
+    "D": 1
 }
 
 
@@ -146,6 +196,25 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def rank_at_least(actual: str, minimum: str) -> bool:
+    actual_score = RANK_ORDER.get((actual or "D").upper(), 1)
+    minimum_score = RANK_ORDER.get((minimum or "D").upper(), 1)
+    return actual_score >= minimum_score
+
+
+def infer_sector_and_group(symbol: str):
+    code = normalize_symbol(symbol)
+    return SECTOR_MAP.get(code, ("Other", "General"))
+
+
+def classify_liquidity(vol_ma20: float):
+    if vol_ma20 >= 1_000_000:
+        return "High"
+    if vol_ma20 >= 300_000:
+        return "Medium"
+    return "Low"
 
 
 def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -289,17 +358,33 @@ def classify_setup(score: float) -> str:
     return "D"
 
 
-def infer_sector_and_group(symbol: str):
-    code = normalize_symbol(symbol)
-    return SECTOR_MAP.get(code, ("Other", "General"))
+def passes_top_pick_filter(
+    item: dict,
+    min_score: float = 55,
+    min_setup_rank: str = "B",
+    active_only: bool = True,
+    sector: str | None = None
+) -> bool:
+    if not item.get("ok"):
+        return False
 
+    if active_only and not item.get("active", False):
+        return False
 
-def classify_liquidity(vol_ma20: float):
-    if vol_ma20 >= 1_000_000:
-        return "High"
-    if vol_ma20 >= 300_000:
-        return "Medium"
-    return "Low"
+    if safe_float(item.get("signalScore", 0)) < min_score:
+        return False
+
+    if not rank_at_least(item.get("setupRank", "D"), min_setup_rank):
+        return False
+
+    trend_stage = str(item.get("trendStage", "Unknown"))
+    if trend_stage not in ["Uptrend", "StrongUptrend"]:
+        return False
+
+    if sector and str(item.get("sector", "")).lower() != sector.lower():
+        return False
+
+    return True
 
 
 def fetch_stock_df(symbol: str, source: str):
@@ -420,9 +505,28 @@ def build_universe_item(code: str) -> dict:
     }
 
 
+def scan_universe(symbols: list[str]) -> list[dict]:
+    codes = unique_symbols(symbols)
+    results = []
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(build_universe_item, code): code for code in codes}
+        for future in as_completed(futures):
+            results.append(future.result())
+
+    results.sort(
+        key=lambda x: (
+            0 if x.get("ok") else 1,
+            -safe_float(x.get("signalScore", 0)),
+            x.get("symbol", "")
+        )
+    )
+    return results
+
+
 @app.get("/")
 def root():
-    return {"ok": True, "service": "vn-signal-bridge", "version": "2.0.1"}
+    return {"ok": True, "service": "vn-signal-bridge", "version": "3.0.0"}
 
 
 @app.get("/health")
@@ -430,7 +534,8 @@ def health():
     return {
         "ok": True,
         "supportedSources": SUPPORTED_SOURCES,
-        "cacheItems": len(_quote_cache)
+        "cacheItems": len(_quote_cache),
+        "universeSize": len(DEFAULT_UNIVERSE)
     }
 
 
@@ -488,6 +593,100 @@ def batch_universe(req: BatchRequest):
             "success": success,
             "failed": len(results) - success,
             "results": results
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.get("/universe_auto")
+def universe_auto(
+    limit: int = 300,
+    active_only: bool = False,
+    sector: str | None = None
+):
+    try:
+        universe = DEFAULT_UNIVERSE[:max(1, min(limit, len(DEFAULT_UNIVERSE)))]
+        results = scan_universe(universe)
+
+        if active_only:
+            results = [x for x in results if x.get("active")]
+
+        if sector:
+            results = [
+                x for x in results
+                if str(x.get("sector", "")).lower() == sector.lower()
+            ]
+
+        success = sum(1 for x in results if x.get("ok"))
+
+        return {
+            "ok": True,
+            "scanSize": len(universe),
+            "total": len(results),
+            "success": success,
+            "failed": len(results) - success,
+            "results": results
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "ok": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.get("/top_picks")
+def top_picks(
+    limit: int = 20,
+    min_score: float = 55,
+    min_setup_rank: str = "B",
+    active_only: bool = True,
+    sector: str | None = None
+):
+    try:
+        results = scan_universe(DEFAULT_UNIVERSE)
+
+        filtered = [
+            x for x in results
+            if passes_top_pick_filter(
+                x,
+                min_score=min_score,
+                min_setup_rank=min_setup_rank,
+                active_only=active_only,
+                sector=sector
+            )
+        ]
+
+        filtered.sort(
+            key=lambda x: (
+                -safe_float(x.get("signalScore", 0)),
+                -safe_float(x.get("volumeRatio", 0)),
+                x.get("symbol", "")
+            )
+        )
+
+        top_results = filtered[:max(1, min(limit, 100))]
+
+        return {
+            "ok": True,
+            "universeSize": len(DEFAULT_UNIVERSE),
+            "matched": len(filtered),
+            "returned": len(top_results),
+            "filters": {
+                "min_score": min_score,
+                "min_setup_rank": min_setup_rank,
+                "active_only": active_only,
+                "sector": sector
+            },
+            "results": top_results
         }
 
     except Exception as e:
